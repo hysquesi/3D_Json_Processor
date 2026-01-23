@@ -3,148 +3,116 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import numpy as np
 from typing import Dict, Any, List, Tuple
 from src.utils import Log
+import math
 
 class MeshVisualizer:
     """
-    3D JSON 데이터를 로드하여 Wireframe으로 시각화하고
-    Greedy 알고리즘으로 인접한 면의 색상을 구분합니다.
+    3D JSON 데이터를 로드하여 시각화합니다.
+    [변경] Backface Culling 로직이 삭제되었습니다.
+    Normal Vector는 로드 후 직접 계산하여 화살표로 시각화합니다.
     """
     
-    # 빨주노초파남보 색상 정의 (Matplotlib 색상 코드)
     RAINBOW_COLORS = ['red', 'orange', 'yellow', 'green', 'blue', 'indigo', 'violet']
 
     def __init__(self, data: Dict[str, Any]):
         self.data = data
-        self.faces = {}  # { 'Plane_001': [ (x,y,z), (x,y,z), ... ] }
-        self.adjacency = {} # { 'Plane_001': set(['Plane_002', ...]) }
-        self.colors = {}    # { 'Plane_001': 'red' }
+        self.faces = {}
+        self.normals = {} 
+        self.adjacency = {}
+        self.colors = {}
 
     def process(self):
-        """데이터 파싱, 인접 계산, 색상 할당, 시각화를 순차적으로 실행"""
         Log.section("Visualization Started")
         
-        # 1. 데이터 파싱 (Vertex 추출)
+        # 1. Geometry 파싱
         self._parse_geometry()
-        Log.info(f"Loaded {len(self.faces)} faces.")
-
+        
         if not self.faces:
             Log.warning("No geometry found to visualize.")
             return
+            
+        # 2. Normal Vector 직접 계산 (화살표 시각화용)
+        self._calculate_all_normals()
+        Log.info(f"Calculated normals for {len(self.normals)} faces.")
 
-        # 2. 인접 그래프 생성
+        # 3. 그래프 생성 및 시각화
         self._build_adjacency_graph()
-        
-        # 3. Greedy 색상 할당
         self._assign_colors_greedy()
-        
-        # 4. 3D 플로팅
         self._plot_3d()
 
     def _parse_geometry(self):
-        """
-        JSON 구조에서 vertex 좌표를 추출하여 면(Face) 정보를 구축합니다.
-        Longi 계열과 같이 중첩된 구조도 처리할 수 있도록 개선되었습니다.
-        """
         def extract_vertices_from_dict(d: Dict) -> List[Tuple[float, float, float]]:
-            """딕셔너리에서 vertex 정보를 찾아 좌표 리스트로 반환"""
             vertices = []
-            # 'vertex'가 포함된 키들을 정렬하여 순서대로 추출 (대소문자 무시)
             sorted_keys = sorted([k for k in d.keys() if "vertex" in k.lower()])
-            
             for k in sorted_keys:
                 v = d[k]
-                # 리스트 형태: [x, y, z]
-                if isinstance(v, (list, tuple)) and len(v) >= 3:
-                    vertices.append(tuple(v[:3]))
-                # 딕셔너리 형태: {"x": ..., "y": ..., "z": ...}
-                elif isinstance(v, dict):
+                if isinstance(v, dict):
                     try:
-                        x = float(v.get('x', 0))
-                        y = float(v.get('y', 0))
-                        z = float(v.get('z', 0))
-                        vertices.append((x, y, z))
-                    except (ValueError, TypeError):
-                        pass
+                        vertices.append((float(v.get('x', 0)), float(v.get('y', 0)), float(v.get('z', 0))))
+                    except: pass
             return vertices
 
         for key, value in self.data.items():
-            if not isinstance(value, dict):
-                continue
+            if not isinstance(value, dict): continue
 
-            # 1. 현재 레벨에서 바로 Vertex 확인 (예: Plane 계열)
-            # Plane_001 -> { Vertex_001: ... }
-            verts = extract_vertices_from_dict(value)
-            if verts and len(verts) >= 3:
-                self.faces[key] = verts
-                continue
+            def process_face(k, v):
+                verts = extract_vertices_from_dict(v)
+                if verts and len(verts) >= 3:
+                    self.faces[k] = verts
 
-            # 2. 하위 레벨 탐색 (예: Longi 계열)
-            # Longi_001 -> { Longi_001_Bot_001: {Vertex...}, Longi_001_Left_001: {Vertex...} }
+            process_face(key, value)
             for sub_key, sub_value in value.items():
                 if isinstance(sub_value, dict):
-                    sub_verts = extract_vertices_from_dict(sub_value)
-                    if sub_verts and len(sub_verts) >= 3:
-                        # 하위 키(예: Longi_001_Bot_001)를 face 이름으로 사용
-                        self.faces[sub_key] = sub_verts
+                    process_face(sub_key, sub_value)
+
+    def _calculate_all_normals(self):
+        """모든 면에 대해 Normal Vector를 계산합니다."""
+        for face_id, verts in self.faces.items():
+            self.normals[face_id] = self._calculate_single_normal(verts)
+
+    def _calculate_single_normal(self, verts: List[Tuple[float, float, float]]) -> Tuple[float, float, float]:
+        """C# CalculateNormal 메서드 논리 구현"""
+        n = len(verts)
+        if n < 3:
+            return (0.0, 1.0, 0.0)
+
+        sum_x, sum_y, sum_z = 0.0, 0.0, 0.0
+
+        for i in range(n):
+            curr = verts[i]
+            next_v = verts[(i + 1) % n]
+
+            # C# Logic: (next - current) * (sum)
+            sum_x += (next_v[1] - curr[1]) * (curr[2] + next_v[2])
+            sum_y += (next_v[2] - curr[2]) * (curr[0] + next_v[0])
+            sum_z += (next_v[0] - curr[0]) * (curr[1] + next_v[1])
+
+        length = math.sqrt(sum_x**2 + sum_y**2 + sum_z**2)
+        if length < 1e-9:
+            return (0.0, 1.0, 0.0)
+
+        return (sum_x / length, sum_y / length, sum_z / length)
 
     def _build_adjacency_graph(self):
-        """
-        면들 간의 인접 관계(공유하는 점이 있는지)를 파악하여 그래프 생성
-        단순화를 위해 '2개 이상의 점을 공유'하면 인접으로 간주
-        """
         face_ids = list(self.faces.keys())
         n = len(face_ids)
-        
-        # 초기화
         for fid in face_ids:
             self.adjacency[fid] = set()
-
-        # O(N^2) 비교 (면 개수가 많으면 최적화 필요)
         for i in range(n):
-            id_a = face_ids[i]
-            verts_a = set(self.faces[id_a]) # 비교를 위해 set으로 변환
-            
             for j in range(i + 1, n):
-                id_b = face_ids[j]
-                verts_b = set(self.faces[id_b])
-                
-                # 공유하는 vertex 개수 계산
-                common_verts = verts_a.intersection(verts_b)
-                
-                # 2개 이상 공유 시 인접 (Edge 공유)
-                if len(common_verts) >= 2:
+                id_a, id_b = face_ids[i], face_ids[j]
+                if len(set(self.faces[id_a]).intersection(set(self.faces[id_b]))) >= 2:
                     self.adjacency[id_a].add(id_b)
                     self.adjacency[id_b].add(id_a)
 
     def _assign_colors_greedy(self):
-        """Greedy Graph Coloring Algorithm"""
-        # 차수(Degree)가 높은 순서대로 정렬하면 색상 사용을 최적화하는 데 도움됨
-        sorted_faces = sorted(self.faces.keys(), 
-                              key=lambda k: len(self.adjacency[k]), 
-                              reverse=True)
-        
+        sorted_faces = sorted(self.faces.keys(), key=lambda k: len(self.adjacency[k]), reverse=True)
         for face_id in sorted_faces:
-            # 인접한 면들이 사용 중인 색상 집합 구하기
-            neighbor_colors = set()
-            for neighbor in self.adjacency[face_id]:
-                if neighbor in self.colors:
-                    neighbor_colors.add(self.colors[neighbor])
-            
-            # 사용 가능한 첫 번째 색상 찾기
-            found_color = None
-            for color in self.RAINBOW_COLORS:
-                if color not in neighbor_colors:
-                    found_color = color
-                    break
-            
-            # 7가지 색으로 부족할 경우, 회색(gray)을 기본값으로 사용
-            if found_color is None:
-                found_color = 'gray' 
-            
-            self.colors[face_id] = found_color
+            neighbor_colors = {self.colors[n] for n in self.adjacency[face_id] if n in self.colors}
+            found = next((c for c in self.RAINBOW_COLORS if c not in neighbor_colors), 'gray')
+            self.colors[face_id] = found
 
     def _plot_3d(self):
-        """Matplotlib을 이용한 3D 시각화"""
         fig = plt.figure(figsize=(10, 8))
         ax = fig.add_subplot(111, projection='3d')
         
@@ -152,30 +120,45 @@ class MeshVisualizer:
         face_colors = []
 
         for face_id, verts in self.faces.items():
-            polygons.append(verts)
+            # 1. Mesh Plot (Unity to Plot: x, z, y)
+            visual_verts = [(v[0], v[2], v[1]) for v in verts]
+            polygons.append(visual_verts)
+            
             face_colors.append(self.colors.get(face_id, 'gray'))
 
+            # 2. Normal Vector Plot (화살표 그리기)
+            if face_id in self.normals:
+                nx, ny, nz = self.normals[face_id]
+                
+                # 중심점 (Unity to Plot)
+                orig_verts = np.array(verts)
+                center = orig_verts.mean(axis=0)
+                sx, sy, sz = center[0], center[2], center[1]
+                
+                # 방향 (Unity to Plot)
+                dx, dy, dz = nx, nz, ny
+                
+                ax.quiver(sx, sy, sz, dx, dy, dz,
+                          length=0.25, color='black', linewidth=1.0, arrow_length_ratio=0.3)
+
         # Poly3DCollection 생성
-        # alpha: 투명도, edgecolor: 테두리 색상
-        poly_collection = Poly3DCollection(polygons, alpha=0.6, edgecolor='k')
+        poly_collection = Poly3DCollection(polygons, alpha=0.6, edgecolor='gray', linewidths=0.5)
         poly_collection.set_facecolor(face_colors)
-        
         ax.add_collection3d(poly_collection)
 
-        # 축 범위 자동 설정
-        all_verts = [v for verts in self.faces.values() for v in verts]
-        if all_verts:
-            all_verts = np.array(all_verts)
-            x_min, y_min, z_min = all_verts.min(axis=0)
-            x_max, y_max, z_max = all_verts.max(axis=0)
-            
-            ax.set_xlim(x_min, x_max)
-            ax.set_ylim(y_min, y_max)
-            ax.set_zlim(z_min, z_max)
+        # 축 범위 설정
+        all_visual_verts = [v for poly in polygons for v in poly]
+        if all_visual_verts:
+            arr = np.array(all_visual_verts)
+            ax.set_xlim(arr[:,0].min(), arr[:,0].max())
+            ax.set_ylim(arr[:,1].min(), arr[:,1].max())
+            ax.set_zlim(arr[:,2].min(), arr[:,2].max())
 
-        ax.set_xlabel('X')
-        ax.set_ylabel('Y')
-        ax.set_zlabel('Z')
+        ax.set_xlabel('Unity X')
+        ax.set_ylabel('Unity Z (Depth)')
+        ax.set_zlabel('Unity Y (Height)')
         ax.set_title(f'3D Mesh Visualization ({len(self.faces)} faces)')
+
+    
 
         plt.show()

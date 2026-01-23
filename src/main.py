@@ -34,15 +34,30 @@ sys.excepthook = global_exception_handler
 # 2. Main 실행
 # ==========================================
 def main():
-    # 1. 데이터 변환 단계 (Converters)
-    # JSON 파일 구조 변경 및 저장 수행
-    processor = BatchProcessor()
+    # ==========================================
+    # [설정] 사용자 파라미터
+    # ==========================================
+    
+    # 1. 면 병합 기능 사용 여부 (True/False)
+    ENABLE_MERGE = True
+    # 2. 병합 오차율 설정 (0.01 = 1%)
+    # 분석 결과 추천값: 0.03 (3%)
+    MERGE_TOLERANCE = 0.03
+
+    # ==========================================
+    
+    # 설정값을 Processor에 전달
+    processor = BatchProcessor(
+        enable_merge=ENABLE_MERGE, 
+        merge_tolerance=MERGE_TOLERANCE
+    )
     processor.run()
     
-    # 2. 결과 시각화 단계 (Visualizers)
-    # 저장된 결과 파일을 로드하여 3D 그래프로 표시
-    visualizer = BatchVisualizer()
-    visualizer.run()
+    # visualizer = BatchVisualizer()
+    # visualizer.run()
 
 if __name__ == "__main__":
     main()
+
+
+    # 52, 50, 40, 42, 3, 37, 46, 35, 49
