@@ -1,3 +1,4 @@
+# src/processors/converters/__init__.py
 """
 Converters Sub-package
 ======================
@@ -8,10 +9,11 @@ Modules:
 --------
 - data_modifier.py: 개별 JSON 데이터의 키/구조 변경 로직 (DataModifier)
 - batch_processor.py: 디렉토리 순회 및 전체 변환 공정 제어 (BatchProcessor)
+- geometry_merger.py: 형상 병합 및 최적화 로직 (GeometryMerger)
 """
 
-# 파일명 변경 반영: modifier -> data_modifier, batch_runner -> batch_processor
 from .data_modifier import DataModifier
 from .batch_processor import BatchProcessor
+from .geometry_merger import GeometryMerger
 
-__all__ = ["DataModifier", "BatchProcessor"]
+__all__ = ["DataModifier", "BatchProcessor", "GeometryMerger"]

@@ -1,3 +1,4 @@
+# src/main.py
 import sys
 import traceback
 from pathlib import Path
@@ -38,8 +39,9 @@ def main():
     # [설정] 사용자 파라미터
     # ==========================================
     
-    # 1. 면 병합 기능 사용 여부 (True/False)
-    ENABLE_MERGE = True
+    # 1. 면 병합 기능 사용 여부 (True/False) 
+    # !!!!!!!!!!!!!!!!!!!!! 기본 False로 반드시 사용. True 조건 관련 개발은 되지 않음 !!!!!!!!!!!!!!!!!!!!!
+    ENABLE_MERGE = False
     # 2. 병합 오차율 설정 (0.01 = 1%)
     # 분석 결과 추천값: 0.03 (3%)
     MERGE_TOLERANCE = 0.03
@@ -53,11 +55,9 @@ def main():
     )
     processor.run()
     
+    # 시각화 실행 (필요시 주석 해제)
     # visualizer = BatchVisualizer()
     # visualizer.run()
 
 if __name__ == "__main__":
     main()
-
-
-    # 52, 50, 40, 42, 3, 37, 46, 35, 49

@@ -1,3 +1,4 @@
+# src/processors/visualizers/batch_visualizer.py
 from src.config import Config
 from src.utils import JsonHandler, Log
 from .mesh_visualizer import MeshVisualizer

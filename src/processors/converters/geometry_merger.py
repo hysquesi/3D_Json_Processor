@@ -1,3 +1,4 @@
+# src/processors/converters/geometry_merger.py
 import math
 from typing import List, Dict, Tuple, Any, Set
 from src.utils import Log

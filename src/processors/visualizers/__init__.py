@@ -1,3 +1,4 @@
+# src/processors/visualizers/__init__.py
 """
 Visualizers Sub-package
 =======================
@@ -9,7 +10,6 @@ Modules:
 - batch_visualizer.py: 결과 디렉토리 순회 및 순차적 시각화 실행 (BatchVisualizer)
 """
 
-# 파일명 변경 반영: visualizer -> mesh_visualizer
 from .mesh_visualizer import MeshVisualizer
 from .batch_visualizer import BatchVisualizer
 
