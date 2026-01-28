@@ -43,13 +43,20 @@ class BatchProcessor:
         # 1. 정상 데이터 저장
         new_filename = f"{filepath.stem}_Unity{filepath.suffix}"
         output_path = Config.OUTPUT_DIR / new_filename
-        self.io.save_json(output_path, valid_data)
+        
+        # [수정] 최상위 키 "result" 추가
+        output_data = {"result": valid_data}
+        self.io.save_json(output_path, output_data)
         
         # 2. 삭제된 데이터 저장
         if deleted_data:
             deleted_filename = f"{filepath.stem}_Unity_Deleted{filepath.suffix}"
             deleted_path = Config.OUTPUT_DIR / deleted_filename
-            self.io.save_json(deleted_path, deleted_data)
+            
+            # [수정] 최상위 키 "result" 추가
+            output_deleted_data = {"result": deleted_data}
+            self.io.save_json(deleted_path, output_deleted_data)
+            
             Log.info(f"-> Deleted items saved to: {deleted_filename} (Count: {len(deleted_data)})")
         
         Log.info(f"-> Valid items saved to: {new_filename} (Count: {len(valid_data)})")
