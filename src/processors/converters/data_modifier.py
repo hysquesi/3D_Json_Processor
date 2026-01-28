@@ -74,33 +74,53 @@ class DataModifier:
                     if self._is_container(transformed_val):
                         for sub_k, sub_v in transformed_val.items():
                             std_sub_key = self._generate_standard_sub_key(sub_k, idx_str)
-                            
-                            if std_sub_key in longi_groups[main_key]:
-                                dup_count = 1
-                                new_key = f"{std_sub_key}_dup_{dup_count}"
-                                while new_key in longi_groups[main_key]:
-                                    dup_count += 1
-                                    new_key = f"{std_sub_key}_dup_{dup_count}"
-                                longi_groups[main_key][new_key] = sub_v
-                            else:
-                                longi_groups[main_key][std_sub_key] = sub_v
+                            # 중복 시 인덱스 증가 처리
+                            unique_key = self._get_unique_key(longi_groups[main_key], std_sub_key)
+                            longi_groups[main_key][unique_key] = sub_v
                     else:
                         std_sub_key = self._generate_standard_sub_key(key, idx_str)
-                        if std_sub_key in longi_groups[main_key]:
-                             dup_count = 1
-                             new_key = f"{std_sub_key}_dup_{dup_count}"
-                             while new_key in longi_groups[main_key]:
-                                 dup_count += 1
-                                 new_key = f"{std_sub_key}_dup_{dup_count}"
-                             longi_groups[main_key][new_key] = transformed_val
-                        else:
-                            longi_groups[main_key][std_sub_key] = transformed_val
+                        # 중복 시 인덱스 증가 처리
+                        unique_key = self._get_unique_key(longi_groups[main_key], std_sub_key)
+                        longi_groups[main_key][unique_key] = transformed_val
                 else:
                     plane_candidates[key] = transformed_val
             else:
                 plane_candidates[key] = transformed_val
         
         return longi_groups, plane_candidates
+
+    def _get_unique_key(self, container: Dict[str, Any], base_key: str) -> str:
+        """
+        키 충돌 시 인덱스를 증가시켜 유니크한 키를 생성합니다.
+        예: Longi_001_Right_001 -> (중복 시) -> Longi_001_Right_002
+        """
+        if base_key not in container:
+            return base_key
+
+        # 정규식: Longi_{ParentIdx}_{Type}_{Index}{Suffix} 형태 파싱
+        # Group 1: Prefix (예: Longi_001_Right_)
+        # Group 2: Index (예: 001)
+        # Group 3: Suffix (예: _Flange, _UpSide 등, 없을 수도 있음)
+        match = re.match(r"^(Longi_\d+_[A-Za-z]+_)(\d+)(.*)$", base_key)
+        
+        if match:
+            prefix = match.group(1)
+            current_num = int(match.group(2))
+            suffix = match.group(3)
+            
+            while True:
+                current_num += 1
+                new_key = f"{prefix}{current_num:03d}{suffix}"
+                if new_key not in container:
+                    return new_key
+        
+        # 패턴 매칭 실패 시 Fallback (기존 _dup_ 방식 유지)
+        dup_count = 1
+        new_key = f"{base_key}_dup_{dup_count}"
+        while new_key in container:
+            dup_count += 1
+            new_key = f"{base_key}_dup_{dup_count}"
+        return new_key
 
     def _is_container(self, value: Any) -> bool:
         if not isinstance(value, dict): return False
@@ -148,8 +168,9 @@ class DataModifier:
     def _validate_longi_group(self, key: str, sub_items: Dict[str, Any]) -> Tuple[bool, str]:
         sub_keys = sub_items.keys()
         
-        right_count = sum(1 for k in sub_keys if "_Right_" in k)
-        left_count = sum(1 for k in sub_keys if "_Left_" in k)
+        # [수정] _Right_ 또는 _Left_를 셀 때 _Flange가 포함된 경우는 제외
+        right_count = sum(1 for k in sub_keys if "_Right_" in k and "_Flange" not in k)
+        left_count = sum(1 for k in sub_keys if "_Left_" in k and "_Flange" not in k)
         
         if right_count >= 3 or left_count >= 3:
             return False, f"Complex Shape (Right: {right_count}, Left: {left_count})"
@@ -172,7 +193,6 @@ class DataModifier:
         
         # [Fix] 병합 대상 식별 시 Suffix가 붙은 키들도 안전하게 처리
         # "_BackSide_"가 포함되어 있고 "_Flange"가 없는 것만 순수 BackSide로 간주 (기존 유지)
-        # 만약 BackSide_001_Flange_UpSide 같은 경우 Flange가 포함되므로 병합에서 제외됨 -> 의도된 동작으로 보임
         for k, v in data.items():
             if "_BackSide_" in k and "_Flange" not in k:
                 backside_candidates[k] = v
