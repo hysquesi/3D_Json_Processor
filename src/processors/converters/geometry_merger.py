@@ -1,17 +1,15 @@
 # src/processors/converters/geometry_merger.py
 import math
+import numpy as np
+from scipy.spatial import ConvexHull
 from typing import List, Dict, Tuple, Any, Set
 from src.utils import Log
 
 class GeometryMerger:
     """
-    1. Plane Equation (Normal, Distance)으로 같은 평면 그룹화
-    2. Edge Vector Collinearity Check로 물리적 인접성 판단
-    3. T-Junction Resolution (점 주입)으로 부분 겹침 해결
-    4. Boundary Tracing으로 병합 (실패 시 개별 면 보존)
-    
-    [Fix] Partial Merge Failure Handling (Prevent Data Loss)
-    [Fix] Pass 2 Relaxed Tolerance & Artifact Cleaning
+    형상 병합 및 최적화 로직을 담당합니다.
+    - 기존의 Plane Merge (인접 평면 병합)
+    - [New] Convex Hull Merge (흩어진 조각을 하나의 볼록 다각형으로 통합)
     """
 
     def __init__(self, norm_tol: float = 0.01, dist_tol: float = 0.01, point_tol: float = 0.001):
@@ -19,11 +17,80 @@ class GeometryMerger:
         self.dist_tol = dist_tol
         self.point_tol = point_tol
 
+    def merge_by_convex_hull(self, plane_items: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        여러 평면 조각들의 모든 Vertex를 수집하여, 
+        이를 감싸는 하나의 볼록 다각형(Convex Hull)으로 병합합니다.
+        Longi BackSide 최적화용으로 사용됩니다.
+        """
+        # 1. 모든 Vertex 수집
+        all_verts = []
+        for key, val in plane_items.items():
+            verts = self._extract_vertices(val)
+            for v in verts:
+                all_verts.append([v['x'], v['y'], v['z']])
+        
+        if len(all_verts) < 3:
+            return plane_items # 점이 너무 적으면 병합 불가
+
+        points = np.array(all_verts)
+        
+        # 2. 최적 평면 도출 (PCA/SVD 이용)
+        centroid = np.mean(points, axis=0)
+        centered = points - centroid
+        
+        try:
+            u, s, vh = np.linalg.svd(centered)
+            normal = vh[2, :] 
+        except np.linalg.LinAlgError:
+            Log.warning("SVD failed during Convex Hull merge. Using default normal.")
+            normal = np.array([0, 0, 1])
+
+        # 3. 로컬 2D 좌표계 생성
+        if abs(normal[0]) < 0.9:
+            arb = np.array([1, 0, 0])
+        else:
+            arb = np.array([0, 1, 0])
+            
+        x_axis = np.cross(normal, arb)
+        norm_x = np.linalg.norm(x_axis)
+        if norm_x < 1e-6:
+             x_axis = np.array([0, 1, 0]) if abs(normal[2]) < 0.9 else np.array([1, 0, 0])
+        else:
+             x_axis /= norm_x
+             
+        y_axis = np.cross(normal, x_axis)
+        
+        # 4. 3D 점들을 로컬 2D 평면으로 투영
+        projected_x = np.dot(centered, x_axis)
+        projected_y = np.dot(centered, y_axis)
+        points_2d = np.column_stack((projected_x, projected_y))
+        
+        # 5. 2D Convex Hull 계산
+        try:
+            hull = ConvexHull(points_2d)
+            hull_indices = hull.vertices
+        except Exception as e:
+            Log.warning(f"ConvexHull calculation failed: {e}. Reverting to original.")
+            return plane_items
+
+        # 6. 2D Hull 점들을 다시 3D로 복원
+        hull_points_2d = points_2d[hull_indices]
+        
+        hull_points_3d = []
+        for p2 in hull_points_2d:
+            # P_3d = Centroid + x*X_axis + y*Y_axis
+            p3 = centroid + p2[0] * x_axis + p2[1] * y_axis
+            hull_points_3d.append({'x': p3[0], 'y': p3[1], 'z': p3[2]})
+            
+        # 7. 결과 반환
+        result = {}
+        result["Merged_BackSide"] = self._format_to_json(hull_points_3d)
+        
+        return result
+
     def merge_planes(self, plane_items: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        병합 로직을 2회 반복(Pass 1 -> Pass 2).
-        Pass 2에서는 오차율을 완화하고 강력한 정제를 수행합니다.
-        """
+        """기존의 인접 평면 병합 로직"""
         current_data = plane_items
         original_point_tol = self.point_tol
         
@@ -35,7 +102,6 @@ class GeometryMerger:
             
             if pass_num == 2:
                 relaxed_tol = 0.05
-                Log.info(f">>> Relaxing Point Tolerance for Pass 2: {self.point_tol} -> {relaxed_tol}")
                 self.point_tol = relaxed_tol
 
             new_data = self._execute_single_pass(current_data, pass_num)
@@ -47,7 +113,6 @@ class GeometryMerger:
                  self.point_tol = original_point_tol
 
             if input_count == output_count and pass_num == 2:
-                Log.info("No further reduction in Pass 2.")
                 return new_data
 
             current_data = new_data
@@ -55,16 +120,14 @@ class GeometryMerger:
         return current_data
 
     def _execute_single_pass(self, plane_items: Dict[str, Any], pass_num: int) -> Dict[str, Any]:
-        # [Debug] 생존 확인용 추적 세트
+        # (기존 로직 유지)
         all_input_keys = set(plane_items.keys())
         successfully_processed_keys = set()
         
-        # 1. 전처리
         face_list = []
         for key, val in plane_items.items():
             verts = self._extract_vertices(val)
             if len(verts) < 3:
-                Log.warning(f"[Pass {pass_num}] Skipped '{key}': Too few vertices ({len(verts)})")
                 continue
             
             normal = self._calculate_normal(verts)
@@ -78,23 +141,18 @@ class GeometryMerger:
                 'edges': self._extract_edges(verts)
             })
 
-        # 2. 1차 그룹화
         plane_groups = self._group_by_plane(face_list)
         
         merged_results = {}
         idx_counter = 1
 
-        # 3. 2차 그룹화 및 병합
         for group in plane_groups:
             clusters = self._cluster_by_adjacency(group)
             
             for cluster in clusters:
                 cluster_source_keys = [f['original_key'] for f in cluster]
-                
-                # [핵심 수정] 병합 시도 (실패 시 None 반환됨)
                 merged_polygons = self._merge_cluster_to_polygons(cluster)
                 
-                # merged_polygons가 None이거나 빈 리스트면 -> Fallback (원본 보존)
                 if not merged_polygons:
                     for face in cluster:
                         new_key = f"Plane_{idx_counter:03d}"
@@ -102,7 +160,6 @@ class GeometryMerger:
                         successfully_processed_keys.add(face['original_key'])
                         idx_counter += 1
                 else:
-                    # 병합 성공
                     for poly_verts in merged_polygons:
                         new_key = f"Plane_{idx_counter:03d}"
                         merged_results[new_key] = self._format_to_json(poly_verts)
@@ -111,29 +168,13 @@ class GeometryMerger:
                     for k in cluster_source_keys:
                         successfully_processed_keys.add(k)
 
-        # [Final Check] 누락된 키 검사
-        missing_keys = all_input_keys - successfully_processed_keys
-        if missing_keys:
-            Log.error(f"============================================================")
-            Log.error(f"[CRITICAL] {len(missing_keys)} items DISAPPEARED in Pass {pass_num}!")
-            Log.error(f"Missing Keys: {sorted(list(missing_keys))}")
-            Log.error(f"============================================================")
-
         return merged_results
 
-    # =========================================================
-    # 내부 로직
-    # =========================================================
-
+    # ... Helper Methods ...
     def _merge_cluster_to_polygons(self, cluster: List[Dict]) -> List[List[Dict]]:
-        source_keys = [f.get('original_key', 'Unknown') for f in cluster]
-        context_info = f"[{', '.join(source_keys[:3])}...]" if len(source_keys) > 3 else str(source_keys)
-
-        # [Step 1] T-Junction 해결
+        # (기존 로직 유지)
         refined_cluster = self._resolve_t_junctions(cluster)
-
         edge_count = {}
-        # [Step 2] 엣지 카운팅
         for face in refined_cluster:
             verts = face['verts']
             n = len(verts)
@@ -144,7 +185,6 @@ class GeometryMerger:
                 if edge_key not in edge_count: edge_count[edge_key] = 0
                 edge_count[edge_key] += 1
 
-        # [Step 3] 외곽 엣지 수집
         boundary_edges = []
         for face in refined_cluster:
             verts = face['verts']
@@ -156,82 +196,56 @@ class GeometryMerger:
                 if edge_count[edge_key] == 1:
                     boundary_edges.append((p1, p2))
 
-        if not boundary_edges:
-            return None # Fallback trigger
+        if not boundary_edges: return None
 
-        # [Step 4] 모든 루프 추적
         all_loops = self._chain_edges_all(boundary_edges)
-        
-        if not all_loops:
-             return None # Fallback trigger
+        if not all_loops: return None
 
         result_polygons = []
         for loop_tuples in all_loops:
             merged_verts = [{'x': p[0], 'y': p[1], 'z': p[2]} for p in loop_tuples]
+            merged_verts = self._clean_polygon_artifacts(merged_verts)
             
-            # [Step 5] Cleaning
-            merged_verts = self._clean_polygon_artifacts(merged_verts, context_info)
-            
-            # [핵심 수정] 만약 정제 후 유효하지 않은 폴리곤(<3 verts)이 발생하면
-            # 부분 실패로 간주하고 **클러스터 전체 병합을 포기**하고 None을 반환합니다.
-            if len(merged_verts) < 3:
-                Log.warning(f"[Merge Aborted] Cluster produced degenerate polygon (<3 verts). Reverting all to original. Context: {context_info}")
-                return None 
+            if len(merged_verts) < 3: return None
 
-            # Normal 보정
             new_normal = self._calculate_normal(merged_verts)
             original_normal = cluster[0]['normal']
             dot = sum(a*b for a, b in zip(new_normal, original_normal))
-            if dot < 0:
-                merged_verts.reverse()
+            if dot < 0: merged_verts.reverse()
             
             result_polygons.append(merged_verts)
 
         return result_polygons
 
-    def _clean_polygon_artifacts(self, verts: List[Dict], context_info: str = "") -> List[Dict]:
+    def _clean_polygon_artifacts(self, verts: List[Dict]) -> List[Dict]:
         max_iterations = 10
-        original_verts = verts[:]
         current_verts = verts[:]
-        
         for _ in range(max_iterations):
             start_len = len(current_verts)
             if start_len < 3: break
-            
             current_verts = self._remove_spikes(current_verts, self.point_tol)
             current_verts = self._remove_short_edges(current_verts, self.point_tol)
             current_verts = self._remove_collinear(current_verts)
-            
-            end_len = len(current_verts)
-            if start_len == end_len:
-                break 
-        
-        # 정제 결과가 파괴적이면 원본 루프 반환 (하지만 원본 루프도 <3이면 _merge_cluster_to_polygons에서 걸러짐)
-        if len(current_verts) < 3:
-            return original_verts
-            
+            if len(current_verts) == start_len: break
         return current_verts
 
-    def _remove_spikes(self, verts: List[Dict], tol: float) -> List[Dict]:
+    def _remove_spikes(self, verts, tol):
         if len(verts) < 3: return verts
         n = len(verts)
         to_delete = [False] * n
         tol_sq = tol ** 2
-
         for i in range(n):
             p_prev = verts[(i - 1 + n) % n]
             p_next = verts[(i + 1) % n]
             dist_sq = (p_prev['x']-p_next['x'])**2 + (p_prev['y']-p_next['y'])**2 + (p_prev['z']-p_next['z'])**2
-            if dist_sq < tol_sq:
-                to_delete[i] = True
+            if dist_sq < tol_sq: to_delete[i] = True
         return [verts[i] for i in range(n) if not to_delete[i]]
 
-    def _remove_short_edges(self, verts: List[Dict], tol: float) -> List[Dict]:
+    def _remove_short_edges(self, verts, tol):
         if len(verts) < 3: return verts
         n = len(verts)
         result = []
         tol_sq = tol ** 2
-        
         skip_next = False
         for i in range(n):
             if skip_next:
@@ -247,7 +261,7 @@ class GeometryMerger:
                 result.append(p_curr)
         return result
 
-    def _remove_collinear(self, verts: List[Dict]) -> List[Dict]:
+    def _remove_collinear(self, verts):
         if len(verts) < 3: return verts
         n = len(verts)
         to_delete = [False] * n
@@ -266,12 +280,10 @@ class GeometryMerger:
             u1 = (v1[0]/len1, v1[1]/len1, v1[2]/len1)
             u2 = (v2[0]/len2, v2[1]/len2, v2[2]/len2)
             dot = u1[0]*u2[0] + u1[1]*u2[1] + u1[2]*u2[2]
-            if dot > collinear_threshold:
-                to_delete[i] = True
+            if dot > collinear_threshold: to_delete[i] = True
         return [verts[i] for i in range(n) if not to_delete[i]]
 
-    # ... Helper Methods (기존과 동일) ...
-    def _resolve_t_junctions(self, cluster: List[Dict]) -> List[Dict]:
+    def _resolve_t_junctions(self, cluster):
         all_points = set()
         for face in cluster:
             for v in face['verts']:
@@ -314,7 +326,7 @@ class GeometryMerger:
         if dot < self.point_tol or dot > len_sq - self.point_tol: return False
         return True
 
-    def _chain_edges_all(self, edges: List[Tuple]) -> List[List[Tuple]]:
+    def _chain_edges_all(self, edges):
         adj = {}
         for start, end in edges: adj[start] = end
         loops = []
