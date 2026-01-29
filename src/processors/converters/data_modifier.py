@@ -151,7 +151,8 @@ class DataModifier:
         Longi 그룹의 유효성을 검사합니다.
         조건:
         1. Right 또는 Left 부재가 3개 이상이면 복잡 형상으로 간주하여 실패 (Flange 제외)
-        2. Bot은 필수이며, 수직 부재는 BackSide만 인정 (FrontSide 제외)
+        2. Bot과 BackSide는 필수 (FrontSide 제외)
+        3. [New] 오직 Bot과 BackSide만 존재하는 경우도 실패 (단순 형상 제외)
         """
         sub_keys = sub_items.keys()
         
@@ -159,22 +160,24 @@ class DataModifier:
         right_keys = [k for k in sub_keys if "_Right_" in k and "_Flange" not in k]
         left_keys = [k for k in sub_keys if "_Left_" in k and "_Flange" not in k]
         
-        right_count = len(right_keys)
-        left_count = len(left_keys)
-        
-        if right_count >= 3 or left_count >= 3:
-            return False, f"Complex Shape (Right: {right_count}, Left: {left_count})"
+        if len(right_keys) >= 3 or len(left_keys) >= 3:
+            return False, f"Complex Shape (Right: {len(right_keys)}, Left: {len(left_keys)})"
 
         has_bot = any("_Bot_" in k for k in sub_keys)
         has_backside = any("_BackSide_" in k for k in sub_keys)
-        # has_frontside = any("_FrontSide_" in k for k in sub_keys)  # 검사에서 제외
 
-        # [수정] Bot은 필수, 수직 부재는 BackSide만 필수 (FrontSide 조건 제거)
+        # 필수 컴포넌트 체크
         if not (has_bot and has_backside):
             missing = []
             if not has_bot: missing.append("Bot")
             if not has_backside: missing.append("BackSide")
             return False, f"Missing Components ({', '.join(missing)})"
+
+        # [추가] 오직 Bot과 BackSide만 존재하는 경우 체크
+        # 모든 키가 _Bot_ 또는 _BackSide_를 포함하고 있다면, 다른 부재(Right, Left 등)가 없다는 뜻이므로 제외
+        is_only_bot_back = all(("_Bot_" in k or "_BackSide_" in k) for k in sub_keys)
+        if is_only_bot_back:
+            return False, "Only Bot and BackSide"
 
         return True, ""
 
