@@ -152,7 +152,7 @@ class DataModifier:
         조건:
         1. Right 또는 Left 부재가 3개 이상이면 복잡 형상으로 간주하여 실패 (Flange 제외)
         2. Bot과 BackSide는 필수 (FrontSide 제외)
-        3. [New] 오직 Bot과 BackSide만 존재하는 경우도 실패 (단순 형상 제외)
+        3. [New] 다른 부재(Right/Left/FrontSide 등) 없이 오직 Bot과 BackSide만 있으면 삭제
         """
         sub_keys = sub_items.keys()
         
@@ -166,18 +166,22 @@ class DataModifier:
         has_bot = any("_Bot_" in k for k in sub_keys)
         has_backside = any("_BackSide_" in k for k in sub_keys)
 
-        # 필수 컴포넌트 체크
+        # 필수 컴포넌트 체크: Bot과 BackSide가 반드시 있어야 함
         if not (has_bot and has_backside):
             missing = []
             if not has_bot: missing.append("Bot")
             if not has_backside: missing.append("BackSide")
             return False, f"Missing Components ({', '.join(missing)})"
 
-        # [추가] 오직 Bot과 BackSide만 존재하는 경우 체크
-        # 모든 키가 _Bot_ 또는 _BackSide_를 포함하고 있다면, 다른 부재(Right, Left 등)가 없다는 뜻이므로 제외
-        is_only_bot_back = all(("_Bot_" in k or "_BackSide_" in k) for k in sub_keys)
-        if is_only_bot_back:
-            return False, "Only Bot and BackSide"
+        # [추가] 오직 Bot과 BackSide만 존재하는 경우 체크 (Simple Shape 필터링)
+        # 즉, Right, Left, FrontSide가 하나라도 있어야 "의미 있는 형상"으로 간주
+        has_complex_feature = any(
+            ("_Right_" in k) or ("_Left_" in k) or ("_FrontSide_" in k) 
+            for k in sub_keys
+        )
+        
+        if not has_complex_feature:
+            return False, "Only Bot and BackSide (Simple Shape)"
 
         return True, ""
 
