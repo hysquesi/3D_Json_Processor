@@ -12,7 +12,6 @@ class DataModifier:
 
     def __init__(self, enable_merge: bool = True, merge_tolerance: float = 0.01):
         self.longi_id_pattern = re.compile(r"Longi_.*?(\d+)") 
-        # [수정 1] FrontSide를 정규식에 추가하여 'Part'가 아닌 명시적 타입으로 인식하게 함
         self.part_type_pattern = re.compile(r"_(Bot|Right|Left|BackSide|Flange|FrontSide)(?:_|$)", re.IGNORECASE)
         
         self.enable_merge = enable_merge
@@ -50,7 +49,6 @@ class DataModifier:
 
         return valid_data, deleted_data
 
-    # ... (중략: _transform_and_aggregate, _get_unique_key, _is_container 메소드는 기존과 동일) ...
     def _transform_and_aggregate(self, data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         longi_groups = defaultdict(dict)
         plane_candidates = {}
@@ -118,7 +116,6 @@ class DataModifier:
             
         target_substring = raw_key[search_start_pos:]
         
-        # [수정 1의 효과] FrontSide가 포함되어 있으면 match가 성공함
         match = self.part_type_pattern.search(target_substring)
         part_type = match.group(1) if match else "Part"
         
@@ -129,7 +126,6 @@ class DataModifier:
             if strict_num_match:
                 sub_idx = f"{int(strict_num_match.group(1)):03d}"
         
-        # [수정 2] FrontSide 포맷팅 추가
         formatted_type = part_type
         if part_type.lower() == "right": formatted_type = "Right"
         elif part_type.lower() == "left": formatted_type = "Left"
@@ -139,11 +135,6 @@ class DataModifier:
         
         base_key = f"Longi_{parent_idx}_{formatted_type}_{sub_idx}"
 
-        # [기존 로직 유지] FrontSide_Flange_DownSide의 경우:
-        # 1. part_type='FrontSide' -> base_key='Longi_XXX_FrontSide_XXX'
-        # 2. "flange" in target -> base_key += '_Flange'
-        # 3. "downside" in target -> base_key += '_DownSide'
-        # 결과: Longi_XXX_FrontSide_XXX_Flange_DownSide (정보 보존 완료)
         target_lower = target_substring.lower()
         if "flange" in target_lower and formatted_type != "Flange":
             base_key += "_Flange"
@@ -156,35 +147,42 @@ class DataModifier:
         return base_key
 
     def _validate_longi_group(self, key: str, sub_items: Dict[str, Any]) -> Tuple[bool, str]:
+        """
+        Longi 그룹의 유효성을 검사합니다.
+        조건:
+        1. Right 또는 Left 부재가 3개 이상이면 복잡 형상으로 간주하여 실패 (Flange 제외)
+        2. Bot은 필수이며, 수직 부재는 BackSide만 인정 (FrontSide 제외)
+        """
         sub_keys = sub_items.keys()
         
-        right_count = sum(1 for k in sub_keys if "_Right_" in k and "_Flange" not in k)
-        left_count = sum(1 for k in sub_keys if "_Left_" in k and "_Flange" not in k)
+        # Right/Left 개수 카운트 (Flange 제외)
+        right_keys = [k for k in sub_keys if "_Right_" in k and "_Flange" not in k]
+        left_keys = [k for k in sub_keys if "_Left_" in k and "_Flange" not in k]
+        
+        right_count = len(right_keys)
+        left_count = len(left_keys)
         
         if right_count >= 3 or left_count >= 3:
             return False, f"Complex Shape (Right: {right_count}, Left: {left_count})"
 
         has_bot = any("_Bot_" in k for k in sub_keys)
         has_backside = any("_BackSide_" in k for k in sub_keys)
-        # [수정 3] FrontSide도 Web(수직 부재) 역할을 할 수 있으므로 유효성 검사 조건에 추가
-        has_frontside = any("_FrontSide_" in k for k in sub_keys)
-        
-        # Bot은 필수, 수직 부재는 BackSide 혹은 FrontSide 중 하나만 있어도 통과
-        if not (has_bot and (has_backside or has_frontside)):
+        # has_frontside = any("_FrontSide_" in k for k in sub_keys)  # 검사에서 제외
+
+        # [수정] Bot은 필수, 수직 부재는 BackSide만 필수 (FrontSide 조건 제거)
+        if not (has_bot and has_backside):
             missing = []
             if not has_bot: missing.append("Bot")
-            if not (has_backside or has_frontside): missing.append("BackSide/FrontSide")
+            if not has_backside: missing.append("BackSide")
             return False, f"Missing Components ({', '.join(missing)})"
 
         return True, ""
 
     def _optimize_longi_geometry(self, longi_key: str, data: Dict[str, Any]) -> Dict[str, Any]:
         """BackSide 및 FrontSide 평면 병합 (Convex Hull 적용)"""
-        # [수정 4] BackSide 뿐만 아니라 FrontSide도 병합 대상에 포함 (필요 시)
         merge_candidates = {}
         other_parts = {}
         
-        # BackSide 또는 FrontSide를 병합 후보군으로 식별
         for k, v in data.items():
             is_back = ("_BackSide_" in k and "_Flange" not in k)
             is_front = ("_FrontSide_" in k and "_Flange" not in k)
@@ -197,9 +195,6 @@ class DataModifier:
         if len(merge_candidates) < 2:
             return data
 
-        # Convex Hull 병합 수행 (BackSide와 FrontSide가 섞여 있으면 하나의 면으로 병합 시도됨)
-        # 만약 BackSide와 FrontSide가 서로 다른 평면이라면 GeometryMerger 내부에서 SVD/Normal 체크 시
-        # 이상적인 결과가 안 나올 수 있으나, 일반적으로는 하나의 큰 Web으로 간주하여 처리.
         merged_results = self.merger.merge_by_convex_hull(merge_candidates)
         
         final_data = other_parts.copy()
@@ -208,13 +203,11 @@ class DataModifier:
         
         sorted_merged_keys = sorted(merged_results.keys())
         for i, m_key in enumerate(sorted_merged_keys):
-            # 병합된 결과는 대표적으로 'Web' 또는 'BackSide'로 명명
             new_sub_key = f"Longi_{idx_str}_BackSide_{i+1:03d}"
             final_data[new_sub_key] = merged_results[m_key]
 
         return final_data
 
-    # ... (이하 메소드 기존 동일) ...
     def _process_plane_item(self, old_key: str, value: Any, output_dict: Dict[str, Any]):
         match = re.search(r"Standard_Surface_(\d+)", old_key, re.IGNORECASE)
         if match:
