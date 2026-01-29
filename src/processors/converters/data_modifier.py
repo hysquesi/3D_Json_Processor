@@ -27,12 +27,21 @@ class DataModifier:
 
         # [Step 2] Longi 계열 후처리
         for main_key, sub_items in grouped_longis.items():
+            # 2-1. 1차 유효성 검사 (필수 부재 확인 및 복잡도 제한)
             is_valid, reason = self._validate_longi_group(main_key, sub_items)
             
             if is_valid:
-                # 2-2. 최적화 (BackSide/FrontSide 병합 로직 적용)
+                # 2-2. 최적화 (BackSide/FrontSide 각각 병합)
                 optimized_items = self._optimize_longi_geometry(main_key, sub_items)
-                valid_data[main_key] = optimized_items
+                
+                # 2-3. 최종 형상 검사 (최적화 후 단순 형상 필터링)
+                is_final_valid, final_reason = self._validate_final_geometry(main_key, optimized_items)
+                
+                if is_final_valid:
+                    valid_data[main_key] = optimized_items
+                else:
+                    Log.info(f"Filtered '{main_key}' (Post-Optimization): {final_reason}")
+                    deleted_data[main_key] = sub_items
             else:
                 Log.info(f"Filtered '{main_key}': {reason}")
                 deleted_data[main_key] = sub_items
@@ -148,70 +157,92 @@ class DataModifier:
 
     def _validate_longi_group(self, key: str, sub_items: Dict[str, Any]) -> Tuple[bool, str]:
         """
-        Longi 그룹의 유효성을 검사합니다.
+        Longi 그룹의 1차 유효성을 검사합니다.
         조건:
         1. Right 또는 Left 부재가 3개 이상이면 복잡 형상으로 간주하여 실패 (Flange 제외)
         2. Bot과 BackSide는 필수 (FrontSide 제외)
-        3. [New] 다른 부재(Right/Left/FrontSide 등) 없이 오직 Bot과 BackSide만 있으면 삭제
         """
-        sub_keys = sub_items.keys()
+        sub_keys = list(sub_items.keys())
         
-        # Right/Left 개수 카운트 (Flange 제외)
+        # 1. Right/Left 개수 카운트 (Flange 제외)
         right_keys = [k for k in sub_keys if "_Right_" in k and "_Flange" not in k]
         left_keys = [k for k in sub_keys if "_Left_" in k and "_Flange" not in k]
         
         if len(right_keys) >= 3 or len(left_keys) >= 3:
             return False, f"Complex Shape (Right: {len(right_keys)}, Left: {len(left_keys)})"
 
+        # 2. 필수 컴포넌트 체크
         has_bot = any("_Bot_" in k for k in sub_keys)
         has_backside = any("_BackSide_" in k for k in sub_keys)
 
-        # 필수 컴포넌트 체크: Bot과 BackSide가 반드시 있어야 함
         if not (has_bot and has_backside):
             missing = []
             if not has_bot: missing.append("Bot")
             if not has_backside: missing.append("BackSide")
             return False, f"Missing Components ({', '.join(missing)})"
 
-        # [추가] 오직 Bot과 BackSide만 존재하는 경우 체크 (Simple Shape 필터링)
-        # 즉, Right, Left, FrontSide가 하나라도 있어야 "의미 있는 형상"으로 간주
+        return True, ""
+
+    def _validate_final_geometry(self, key: str, data: Dict[str, Any]) -> Tuple[bool, str]:
+        """
+        [New] 최적화된 형상에 대해 최종 검사를 수행합니다.
+        조건:
+        - Bot과 BackSide만 존재하는 단순 형상은 제외합니다.
+        - Right, Left, FrontSide 중 하나라도 존재해야 유효합니다.
+        """
+        keys = list(data.keys())
+        
+        # 복잡 형상을 구성하는 부재(Right, Left, FrontSide)가 하나라도 있는지 확인
         has_complex_feature = any(
-            ("_Right_" in k) or ("_Left_" in k) or ("_FrontSide_" in k) 
-            for k in sub_keys
+            t in k for k in keys for t in ["_Right_", "_Left_", "_FrontSide_"]
         )
         
         if not has_complex_feature:
-            return False, "Only Bot and BackSide (Simple Shape)"
-
+            return False, "Simple Shape (Only Bot/BackSide)"
+            
         return True, ""
 
     def _optimize_longi_geometry(self, longi_key: str, data: Dict[str, Any]) -> Dict[str, Any]:
-        """BackSide 및 FrontSide 평면 병합 (Convex Hull 적용)"""
-        merge_candidates = {}
+        """BackSide 및 FrontSide를 각각 그룹화하여 병합 (Convex Hull 적용)"""
+        back_candidates = {}
+        front_candidates = {}
         other_parts = {}
         
         for k, v in data.items():
             is_back = ("_BackSide_" in k and "_Flange" not in k)
             is_front = ("_FrontSide_" in k and "_Flange" not in k)
             
-            if is_back or is_front:
-                merge_candidates[k] = v
+            if is_back:
+                back_candidates[k] = v
+            elif is_front:
+                front_candidates[k] = v
             else:
                 other_parts[k] = v 
-        
-        if len(merge_candidates) < 2:
-            return data
-
-        merged_results = self.merger.merge_by_convex_hull(merge_candidates)
         
         final_data = other_parts.copy()
         idx_match = re.search(r"(\d+)$", longi_key)
         idx_str = idx_match.group(1) if idx_match else "000"
-        
-        sorted_merged_keys = sorted(merged_results.keys())
-        for i, m_key in enumerate(sorted_merged_keys):
-            new_sub_key = f"Longi_{idx_str}_BackSide_{i+1:03d}"
-            final_data[new_sub_key] = merged_results[m_key]
+
+        # 1. BackSide 병합
+        if len(back_candidates) >= 2:
+            merged_back = self.merger.merge_by_convex_hull(back_candidates)
+            sorted_keys = sorted(merged_back.keys())
+            for i, m_key in enumerate(sorted_keys):
+                new_sub_key = f"Longi_{idx_str}_BackSide_{i+1:03d}"
+                final_data[new_sub_key] = merged_back[m_key]
+        else:
+            final_data.update(back_candidates)
+
+        # 2. FrontSide 병합
+        if len(front_candidates) >= 2:
+            merged_front = self.merger.merge_by_convex_hull(front_candidates)
+            sorted_keys = sorted(merged_front.keys())
+            for i, m_key in enumerate(sorted_keys):
+                # FrontSide 결과도 병합 로직은 동일하지만, 키 이름은 FrontSide로 지정
+                new_sub_key = f"Longi_{idx_str}_FrontSide_{i+1:03d}"
+                final_data[new_sub_key] = merged_front[m_key]
+        else:
+            final_data.update(front_candidates)
 
         return final_data
 
